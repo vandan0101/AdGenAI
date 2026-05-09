@@ -1,9 +1,12 @@
+import "./configs/instrument.mjs"
 import "dotenv/config";
+import http from "node:http";
 import express, { Request, Response } from 'express';
 import cors from "cors";
 import { clerkClient, clerkMiddleware, getAuth } from '@clerk/express'
 import clerkWebhook from "./controllers/clerk.js";
 import { prisma } from "./configs/prisma.js";
+import * as Sentry from "@sentry/node"
 
 const app = express();
 
@@ -63,32 +66,59 @@ app.post('/api/users/sync', async (req: Request, res: Response) => {
 
 const PORT = Number(process.env.PORT) || 5001;
 
+const isPortAlreadyServing = async (port: number) => {
+    return await new Promise<boolean>((resolve) => {
+        const request = http.get(
+            {
+                hostname: "127.0.0.1",
+                port,
+                path: "/",
+                timeout: 1000,
+            },
+            (response) => {
+                response.resume();
+                resolve(true);
+            },
+        );
+
+        request.on("timeout", () => {
+            request.destroy();
+            resolve(false);
+        });
+
+        request.on("error", () => {
+            resolve(false);
+        });
+    });
+};
+
 app.get('/', (req: Request, res: Response) => {
     res.send('Server is Live!');
 });
+app.get("/debug-sentry", function mainHandler(req, res) {
+  throw new Error("My first Sentry error!");
+});
 
+// The error handler must be registered before any other error middleware and after all controllers
+Sentry.setupExpressErrorHandler(app);
 
 
 const server = app.listen(PORT, () => {
     console.log(`Server is running at http://localhost:${PORT}`);
 }); 
 
-const checkDatabaseConnection = async () => {
-    try {
-        await prisma.$queryRawUnsafe("SELECT 1");
-        console.log("Database connected to Neon successfully.");
-    } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        console.error("Database connection failed:", message);
-    }
-};
-
-checkDatabaseConnection();
-
 server.on('error', (error: NodeJS.ErrnoException) => {
     if (error.code === 'EADDRINUSE') {
-        console.error(`Port ${PORT} is already in use. Set a different PORT in your .env (example: PORT=5001).`);
-        process.exit(1);
+        void (async () => {
+            if (await isPortAlreadyServing(PORT)) {
+                console.log(`Server is already running at http://localhost:${PORT}`);
+                process.exit(0);
+            }
+
+            console.error(`Port ${PORT} is already in use. Set a different PORT in your .env (example: PORT=5001).`);
+            process.exit(1);
+        })();
+        return;
     }
 
     console.error('Failed to start server:', error.message);

@@ -11,7 +11,7 @@ import {
 } from "@clerk/react";
 
 import toast from "react-hot-toast";
-import api from "../axios";
+import api from "../../configs/axios";
 
 export default function Navbar() {
 
@@ -62,6 +62,28 @@ export default function Navbar() {
                 error?.response?.data?.message || error.message
             );
 
+            console.log(error);
+        }
+    };
+
+    const addTestCredits = async () => {
+        try {
+            const token = await getToken();
+
+            const { data } = await api.post(
+                "/api/user/credits/topup",
+                {},
+                {
+                    headers: {
+                        Authorization: `Bearer ${token}`
+                    }
+                }
+            );
+
+            setCredits(data.credits);
+            toast.success(data.message);
+        } catch (error) {
+            toast.error(error?.response?.data?.message || error.message);
             console.log(error);
         }
     };
@@ -165,6 +187,12 @@ export default function Navbar() {
                                                 onClick={() => navigate("/plans")}
                                             />
 
+                                            <UserButton.Action
+                                                label="Add Test Credits"
+                                                labelIcon={<MenuIcon size={16} />}
+                                                onClick={addTestCredits}
+                                            />
+
                                         </UserButton.MenuItems>
 
                                     </UserButton>
@@ -266,6 +294,15 @@ export default function Navbar() {
                                                 labelIcon={<MenuIcon size={16} />}
                                                 onClick={() => {
                                                     navigate("/plans");
+                                                    setIsMenuOpen(false);
+                                                }}
+                                            />
+
+                                            <UserButton.Action
+                                                label="Add Test Credits"
+                                                labelIcon={<MenuIcon size={16} />}
+                                                onClick={async () => {
+                                                    await addTestCredits();
                                                     setIsMenuOpen(false);
                                                 }}
                                             />

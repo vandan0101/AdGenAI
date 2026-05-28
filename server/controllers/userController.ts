@@ -22,6 +22,42 @@ export const getUserCredits = async (req: Request, res: Response) => {
   }
 };
 
+// add test credits
+export const addTestCredits = async (req: Request, res: Response) => {
+  try {
+    const { userId } = req.auth();
+
+    if (!userId) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+    });
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const updatedUser = await prisma.user.update({
+      where: { id: userId },
+      data: {
+        credits: {
+          increment: 50,
+        },
+      },
+    });
+
+    res.json({
+      message: "Test credits added",
+      credits: updatedUser.credits,
+    });
+  } catch (error: any) {
+    Sentry.captureException(error);
+    res.status(500).json({ message: error.code || error.message });
+  }
+};
+
 // get all user projects
 export const getAllProjects = async (req: Request, res: Response) => {
   try {

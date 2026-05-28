@@ -1,6 +1,7 @@
 import axios from 'axios';
 
-const baseUrl = ((import.meta as any).env && (import.meta as any).env.VITE_BASEURL) || 'http://localhost:5000';
+const env = (import.meta as any).env || {};
+const baseUrl = env.VITE_BASEURL || env.VITE_SERVER_URL || 'http://localhost:5001';
 
 const api = axios.create({
   baseURL: baseUrl,

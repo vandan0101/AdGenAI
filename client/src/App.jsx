@@ -108,7 +108,7 @@ export default function App() {
                 <Route path="/" element={<Home />} />
                 <Route path="/Home" element={<Home />} />
                 <Route path="/generate" element={<Generator />} />
-                <Route path="/result/:project" element={<Result />} />
+                <Route path="/result/:projectId" element={<Result />} />
                 <Route
                     path="/my-generations"
                     element={<Mygenerations />}

@@ -7,14 +7,14 @@ import {
     Wand2Icon
 } from "lucide-react";
 
-import { useAuth, useUser } from "@clerk/clerk-react";
+import { useAuth, useUser } from "@clerk/react";
 import { useNavigate } from "react-router-dom";
 
 import toast from "react-hot-toast";
 
 import UploadZone from "../components/UploadZone";
 import Title from "../components/title";
-import api from "../axios";
+import api from "../../configs/axios";
 
 export default function Generator() {
 
@@ -129,8 +129,8 @@ export default function Generator() {
                             label="Product Image"
                             file={productImage}
                             onClear={() => setProductImage(null)}
-                            onChange={(e) =>
-                                handleFileChange(e.target.files[0], "product")
+                            onChange={(file) =>
+                                handleFileChange(file, "product")
                             }
                         />
 
@@ -138,8 +138,8 @@ export default function Generator() {
                             label="Model Image"
                             file={modelImage}
                             onClear={() => setModelImage(null)}
-                            onChange={(e) =>
-                                handleFileChange(e.target.files[0], "model")
+                            onChange={(file) =>
+                                handleFileChange(file, "model")
                             }
                         />
 

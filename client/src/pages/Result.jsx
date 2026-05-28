@@ -9,11 +9,11 @@ import {
   SparklesIcon
 } from "lucide-react";
 
-import { useAuth, useUser } from "@clerk/clerk-react";
+import { useAuth, useUser } from "@clerk/react";
 
 import toast from "react-hot-toast";
 
-import api from "../axios";
+import api from "../../configs/axios";
 
 const Result = () => {
 
@@ -48,9 +48,16 @@ const Result = () => {
 
     } catch (error) {
 
-      toast.error(
-        error?.response?.data?.message || error.message
-      );
+      const message = error?.response?.data?.message || error.message;
+
+      toast.error(message);
+
+      if (error?.response?.status === 404) {
+        navigate("/");
+        return;
+      }
+
+      setLoading(false);
 
       console.log(error);
     }

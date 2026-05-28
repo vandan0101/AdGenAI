@@ -4,26 +4,7 @@ import * as Sentry from "@sentry/node";
 import { prisma } from "../configs/prisma.js";
 import cloudinary from "../configs/cloudinary.js";
 
-import {
-  GoogleGenAI,
-  GenerateContentConfig,
-  HarmBlockThreshold,
-  HarmCategory,
-} from "@google/genai";
-
-import fs from "fs";
-
-const getAi = () => {
-  const apiKey = process.env.GEMINI_API_KEY;
-
-  if (!apiKey) {
-    throw new Error("GEMINI_API_KEY is missing");
-  }
-
-  return new GoogleGenAI({
-    apiKey,
-  });
-};
+import sharp from "sharp";
 
 const MOCK_VIDEO_URL =
   "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4";
@@ -31,18 +12,129 @@ const MOCK_VIDEO_URL =
 const MOCK_IMAGE_DELAY_MS = 5000;
 const MOCK_IMAGE_URL = "https://placehold.co/800x1200/png?text=Mock+Generated+Image";
 
-const loadImage = (filePath: string, mimeType: string) => {
-  return {
-    inlineData: {
-      data: fs.readFileSync(filePath).toString("base64"),
-      mimeType,
-    },
-  };
+const getImageDimensions = (aspectRatio?: string) => {
+  switch (aspectRatio) {
+    case "16:9":
+      return { width: 1920, height: 1080 };
+    case "1:1":
+      return { width: 1024, height: 1024 };
+    case "9:16":
+    default:
+      return { width: 1080, height: 1920 };
+  }
 };
 
-const isGeminiQuotaError = (error: unknown) => {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.includes("429") || message.includes("quota") || message.includes("RESOURCE_EXHAUSTED");
+const buildPrompt = ({
+  productName,
+  productDescription,
+  userPrompt,
+}: {
+  productName: string;
+  productDescription: string;
+  userPrompt?: string;
+}) => {
+  return `Create a high quality ecommerce advertisement image for ${productName}. ${productDescription}. ${userPrompt || ""}`.trim();
+};
+
+const escapeXml = (value: string) =>
+  value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+
+const createTextOverlay = ({
+  width,
+  height,
+  title,
+  subtitle,
+}: {
+  width: number;
+  height: number;
+  title: string;
+  subtitle: string;
+}) => {
+  const titleSize = Math.max(34, Math.floor(width * 0.045));
+  const subtitleSize = Math.max(18, Math.floor(width * 0.022));
+
+  return Buffer.from(`
+    <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <linearGradient id="fade" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="rgba(6,10,20,0.05)" />
+          <stop offset="100%" stop-color="rgba(6,10,20,0.85)" />
+        </linearGradient>
+      </defs>
+      <rect width="100%" height="100%" fill="url(#fade)" />
+      <rect x="48" y="48" rx="32" ry="32" width="${Math.floor(width * 0.34)}" height="${Math.floor(height * 0.18)}" fill="rgba(10,14,24,0.55)" />
+      <text x="84" y="${Math.floor(height * 0.82)}" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-size="${titleSize}" font-weight="700">${escapeXml(title)}</text>
+      <text x="84" y="${Math.floor(height * 0.86)}" fill="rgba(255,255,255,0.84)" font-family="Arial, Helvetica, sans-serif" font-size="${subtitleSize}" font-weight="400">${escapeXml(subtitle)}</text>
+    </svg>
+  `);
+};
+
+const generateCompositeImage = async ({
+  imagePaths,
+  aspectRatio,
+  title,
+  subtitle,
+}: {
+  imagePaths: string[];
+  aspectRatio?: string;
+  title: string;
+  subtitle: string;
+}) => {
+  const { width, height } = getImageDimensions(aspectRatio);
+  const mainImagePath = imagePaths[0];
+  const secondaryImagePath = imagePaths[1];
+
+  const background = await sharp(mainImagePath)
+    .resize(width, height, { fit: "cover" })
+    .modulate({ brightness: 0.82, saturation: 1.05 })
+    .blur(0.5)
+    .toBuffer();
+
+  const insetWidth = Math.floor(width * 0.34);
+  const insetHeight = Math.floor(height * 0.28);
+  const insetImage = await sharp(secondaryImagePath)
+    .resize(insetWidth, insetHeight, { fit: "cover" })
+    .png()
+    .toBuffer();
+
+  const insetShadow = Buffer.from(`
+    <svg width="${insetWidth + 40}" height="${insetHeight + 40}" viewBox="0 0 ${insetWidth + 40} ${insetHeight + 40}" xmlns="http://www.w3.org/2000/svg">
+      <rect x="20" y="20" width="${insetWidth}" height="${insetHeight}" rx="28" ry="28" fill="rgba(0,0,0,0.34)" />
+    </svg>
+  `);
+
+  const overlay = createTextOverlay({
+    width,
+    height,
+    title,
+    subtitle,
+  });
+
+  const composed = await sharp({
+    create: {
+      width,
+      height,
+      channels: 4,
+      background: { r: 7, g: 12, b: 24, alpha: 1 },
+    },
+  })
+    .composite([
+      { input: background, left: 0, top: 0 },
+      { input: insetShadow, left: Math.floor(width * 0.56), top: Math.floor(height * 0.12) },
+      { input: insetImage, left: Math.floor(width * 0.56) + 20, top: Math.floor(height * 0.12) + 20 },
+      { input: overlay, left: 0, top: 0 },
+    ])
+    .png()
+    .toBuffer();
+
+  return cloudinary.uploader.upload(`data:image/png;base64,${composed.toString("base64")}`, {
+    resource_type: "image",
+  });
 };
 
 // CREATE PROJECT
@@ -124,108 +216,25 @@ export const createProject = async (req: Request, res: Response) => {
 
     tempProjectId = project.id;
 
-    // IMAGE GENERATION
-    const img1Mime = images[0].mimetype || (images[0] as any).mimeType || "image/png";
-    const img2Mime = images[1].mimetype || (images[1] as any).mimeType || "image/png";
-
-    const img1base64 = loadImage(images[0].path, img1Mime);
-    const img2base64 = loadImage(images[1].path, img2Mime);
-
-    const prompt = {
-      text: `
-      Combine the person and product into a realistic photo.
-      Make the person naturally hold or use the product.
-      Match lighting, shadows, scale and perspective.
-      Make professional studio quality output.
-      Generate ultra realistic ecommerce image.
-
-      Product Name:
-      ${productName}
-
-      Product Description:
-      ${productDescription}
-
-      Additional Instructions:
-      ${userPrompt || ""}
-      `,
-    };
-
-    const model = "gemini-2.5-flash-image";
-
-    const generationConfig: GenerateContentConfig = {
-      maxOutputTokens: 32768,
-      temperature: 1,
-      topP: 0.95,
-
-      responseModalities: ["IMAGE"],
-
-      imageConfig: {
-        aspectRatio: aspectRatio || "9:16",
-      },
-
-      safetySettings: [
-        {
-          category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-          threshold: HarmBlockThreshold.OFF,
-        },
-        {
-          category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-          threshold: HarmBlockThreshold.OFF,
-        },
-        {
-          category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-          threshold: HarmBlockThreshold.OFF,
-        },
-        {
-          category: HarmCategory.HARM_CATEGORY_HARASSMENT,
-          threshold: HarmBlockThreshold.OFF,
-        },
-      ],
-    };
-
-    const ai = getAi();
-
     let uploadResult: { secure_url: string };
 
     try {
-      const response: any = await ai.models.generateContent({
-        model,
-        contents: [img1base64, img2base64, prompt],
-        config: generationConfig,
-      });
+      const title = productName || "Generated Ad";
+      const subtitle = [productDescription, userPrompt]
+        .filter(Boolean)
+        .join(" • ") || "Built from your uploaded images";
 
-      if (!response?.candidates?.[0]?.content?.parts) {
-        throw new Error("Unexpected AI response");
-      }
-
-      const parts = response.candidates[0].content.parts;
-
-      let finalBuffer: Buffer | null = null;
-
-      for (const part of parts) {
-        if (part.inlineData) {
-          finalBuffer = Buffer.from(part.inlineData.data, "base64");
-        }
-      }
-
-      if (!finalBuffer) {
-        throw new Error("Failed to generate image");
-      }
-
-      const base64Image = `data:image/png;base64,${finalBuffer.toString("base64")}`;
-
-      uploadResult = await cloudinary.uploader.upload(base64Image, {
-        resource_type: "image",
+      uploadResult = await generateCompositeImage({
+        imagePaths: images.map((item: any) => item.path),
+        aspectRatio,
+        title,
+        subtitle,
       });
     } catch (generationError) {
-      console.warn("Image generation failed, using fallback image:", (generationError as any)?.message || generationError);
-
-      // If AI quota or any generation issue occurs, use a friendly mock image
-      // and simulate generation delay so UX behaves similarly.
-      await new Promise((resolve) => setTimeout(resolve, MOCK_IMAGE_DELAY_MS));
+      console.warn("Composite image generation failed, using uploaded image fallback:", (generationError as any)?.message || generationError);
 
       uploadResult = {
-        secure_url: MOCK_IMAGE_URL || uploadedImages[0],
+        secure_url: uploadedImages[0],
       };
     }
 

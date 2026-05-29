@@ -61,6 +61,7 @@ const buildNegativePrompt = () =>
   ].join(", ");
 
 const DEFAULT_HUGGINGFACE_MODELS = [
+  "stabilityai/stable-diffusion-xl-base-1.0",
   "black-forest-labs/FLUX.1-schnell",
 ];
 
@@ -93,6 +94,28 @@ const getHuggingFaceErrorMessage = (error: unknown) => {
   }
 
   return (error as any)?.message || "Hugging Face request failed.";
+};
+
+const shouldTryNextHuggingFaceModel = (error: unknown) => {
+  const status = (error as any)?.response?.status;
+  const responseData = (error as any)?.response?.data;
+
+  let responseText = "";
+  if (Buffer.isBuffer(responseData)) {
+    responseText = responseData.toString("utf-8");
+  } else if (typeof responseData === "string") {
+    responseText = responseData;
+  } else if (responseData) {
+    responseText = JSON.stringify(responseData);
+  }
+
+  const normalizedResponseText = responseText.toLowerCase();
+
+  return (
+    status === 403 ||
+    normalizedResponseText.includes("model not supported by provider") ||
+    normalizedResponseText.includes("not supported by provider hf-inference")
+  );
 };
 
 const getHuggingFaceModelCandidates = () => {
@@ -299,7 +322,7 @@ const generateHuggingFaceImage = async ({
       const status = (error as any)?.response?.status;
       console.warn("Hugging Face model attempt failed", { model, status, message: (error as any)?.message });
 
-      if (status !== 403) {
+      if (!shouldTryNextHuggingFaceModel(error)) {
         throw error;
       }
     }

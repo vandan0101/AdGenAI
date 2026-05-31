@@ -60,10 +60,7 @@ const buildNegativePrompt = () =>
     "logo",
   ].join(", ");
 
-const DEFAULT_HUGGINGFACE_MODELS = [
-  "stabilityai/stable-diffusion-xl-base-1.0",
-  "black-forest-labs/FLUX.1-schnell",
-];
+const DEFAULT_HUGGINGFACE_MODELS = ["black-forest-labs/FLUX.1-schnell"];
 
 const isHuggingFaceFallbackAllowed = () =>
   process.env.HUGGINGFACE_ALLOW_FALLBACK === "true";
@@ -87,6 +84,12 @@ const getHuggingFaceErrorMessage = (error: unknown) => {
 
   if (status === 403) {
     return "Hugging Face denied access to the selected model. Check that your HF token has Inference Providers permission and that the model is available for hf-inference.";
+  }
+
+  const normalizedResponseText = responseText.toLowerCase();
+
+  if (normalizedResponseText.includes("depleted") || normalizedResponseText.includes("monthly included credits")) {
+    return `Hugging Face request failed: you have depleted your Hugging Face monthly credits. Either purchase pre-paid credits on Hugging Face or set HUGGINGFACE_ALLOW_FALLBACK=true to use the local composite fallback.`;
   }
 
   if (responseText) {
@@ -113,8 +116,17 @@ const shouldTryNextHuggingFaceModel = (error: unknown) => {
 
   return (
     status === 403 ||
+    status === 404 ||
+    status === 410 ||
+    status === 422 ||
     normalizedResponseText.includes("model not supported by provider") ||
-    normalizedResponseText.includes("not supported by provider hf-inference")
+    normalizedResponseText.includes("not supported by provider hf-inference") ||
+    normalizedResponseText.includes("requested model is deprecated") ||
+    normalizedResponseText.includes("requested model is unavailable") ||
+    normalizedResponseText.includes("model is deprecated") ||
+    normalizedResponseText.includes("no longer supported by provider") ||
+    normalizedResponseText.includes("depleted") ||
+    normalizedResponseText.includes("monthly included credits")
   );
 };
 
@@ -329,6 +341,75 @@ const generateHuggingFaceImage = async ({
   }
 
   throw lastError || new Error("No Hugging Face model could generate an image.");
+};
+
+const generateHuggingFaceVideo = async ({
+  productName,
+  productDescription,
+  userPrompt,
+  targetLength,
+}: {
+  productName: string;
+  productDescription: string;
+  userPrompt?: string;
+  targetLength?: number | string;
+}) => {
+  const promptText = buildPrompt({ productName, productDescription, userPrompt });
+  const hfBaseUrl = process.env.HUGGINGFACE_BASE_URL || "https://router.huggingface.co/hf-inference/models";
+  const modelCandidates = getHuggingFaceModelCandidates();
+  let lastError: unknown;
+
+  for (const model of modelCandidates) {
+    try {
+      const hfUrl = `${hfBaseUrl}/${model}`;
+
+      const hfResp = await axios.post(
+        hfUrl,
+        {
+          inputs: promptText,
+          parameters: {
+            // include a hint for video length if supported by model
+            length: targetLength || 5,
+          },
+          options: {
+            wait_for_model: true,
+          },
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${process.env.HUGGINGFACE_API_TOKEN}`,
+            Accept: "video/mp4",
+            "Content-Type": "application/json",
+          },
+          responseType: "arraybuffer",
+          timeout: 180000,
+        }
+      );
+
+      const contentType = String(hfResp.headers["content-type"] || "");
+      if (!contentType.startsWith("video/")) {
+        const responseText = Buffer.from(hfResp.data).toString("utf-8");
+        throw new Error(`Hugging Face returned a non-video response for model ${model}: ${responseText}`);
+      }
+
+      const base64Video = Buffer.from(hfResp.data, "binary").toString("base64");
+
+      return cloudinary.uploader.upload(`data:video/mp4;base64,${base64Video}`, {
+        resource_type: "video",
+      });
+    } catch (error) {
+      lastError = error;
+
+      const status = (error as any)?.response?.status;
+      console.warn("Hugging Face video model attempt failed", { model, status, message: (error as any)?.message });
+
+      if (!shouldTryNextHuggingFaceModel(error)) {
+        throw error;
+      }
+    }
+  }
+
+  throw lastError || new Error("No Hugging Face model could generate a video.");
 };
 
 // CREATE PROJECT
@@ -608,9 +689,67 @@ export const createVideo = async (req: Request, res: Response) => {
         isGenerating: true,
       },
     });
+    let uploadResult: { secure_url: string } | null = null;
+    const shouldUseHuggingFace = process.env.HUGGINGFACE_ENABLED === "true";
+    const allowHuggingFaceFallback = isHuggingFaceFallbackAllowed();
 
-    // MOCK VIDEO GENERATION
-    await new Promise((resolve) => setTimeout(resolve, 5000));
+    try {
+      if (shouldUseHuggingFace && process.env.HUGGINGFACE_API_TOKEN) {
+        console.log("Generation: attempting Hugging Face video inference for project", project.id);
+
+        try {
+          uploadResult = await generateHuggingFaceVideo({
+            productName: project.productName || project.name || "Generated Video",
+            productDescription: project.productDescription || "",
+            userPrompt: project.userPrompt || undefined,
+            targetLength: project.targetLength || undefined,
+          });
+
+          console.log("Generation: Hugging Face video inference succeeded, uploaded result to Cloudinary for project", project.id);
+        } catch (hfError) {
+          const message = (hfError as any)?.message || String(hfError);
+          const status = (hfError as any)?.response?.status;
+
+          console.warn("Generation: Hugging Face video failed", {
+            projectId: project.id,
+            status,
+            message,
+            allowFallback: allowHuggingFaceFallback,
+          });
+
+          if (!allowHuggingFaceFallback) {
+            throw hfError;
+          }
+
+          console.warn("Generation: using mock video fallback after Hugging Face failure", {
+            projectId: project.id,
+          });
+
+          uploadResult = { secure_url: MOCK_VIDEO_URL } as any;
+        }
+      } else {
+        console.log("Generation: using mock video for project", project.id);
+        uploadResult = { secure_url: MOCK_VIDEO_URL } as any;
+      }
+    } catch (generationError) {
+      const message = (generationError as any)?.message || String(generationError);
+      const status = (generationError as any)?.response?.status;
+      console.warn("Video generation failed for project", project.id, message);
+
+      const userMessage = status ? getHuggingFaceErrorMessage(generationError) : message;
+
+      await prisma.project.update({
+        where: { id: project.id },
+        data: {
+          isGenerating: false,
+          error: userMessage,
+        },
+      });
+
+      return res.status(500).json({
+        message: userMessage,
+      });
+    }
 
     // UPDATE PROJECT
     await prisma.project.update({
@@ -618,14 +757,14 @@ export const createVideo = async (req: Request, res: Response) => {
         id: project.id,
       },
       data: {
-        generatedVideo: MOCK_VIDEO_URL,
+        generatedVideo: uploadResult?.secure_url,
         isGenerating: false,
       },
     });
 
     res.json({
-      message: "Mock video generation completed",
-      videoUrl: MOCK_VIDEO_URL,
+      message: "Video generation completed",
+      videoUrl: uploadResult?.secure_url,
     });
   } catch (error: any) {
     Sentry.captureException(error);
